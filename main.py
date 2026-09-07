@@ -10,7 +10,13 @@ from datetime import datetime, timedelta
 # ------------------------------
 st.set_page_config(page_title="학교 중식 메뉴 분석", layout="wide")
 
-API_KEY = "YOUR_API_KEY"  # 본인의 NEIS Open API 인증키 입력
+# Streamlit Cloud Secrets에서 API 키 불러오기
+try:
+    API_KEY = st.secrets["NEIS_API_KEY"]
+except Exception:
+    st.error("⚠️ API 키가 설정되지 않았습니다. Streamlit Cloud의 Secrets 또는 로컬 .streamlit/secrets.toml 파일을 확인해주세요.")
+    st.stop()
+
 BASE_URL = "https://open.neis.go.kr/hub/mealServiceDietInfo"
 
 # 학교 정보 (지역코드, 학교코드, 학교명)
@@ -51,7 +57,6 @@ def get_lunch_data(office_code, school_code, start_date, end_date):
         res = requests.get(BASE_URL, params=params, timeout=10)
         data = res.json()
 
-        # 결과가 없거나 오류 응답인 경우
         first_key = data.get("mealServiceDietInfo", [{}])[0]
         if "RESULT" in first_key:
             return pd.DataFrame(), first_key["RESULT"].get("MESSAGE", "데이터 없음")
@@ -127,7 +132,6 @@ if today_schools:
                 for item in menu_items:
                     st.write(f"- {item}")
 
-                # 오늘 메뉴에 유행/친환경/채식 키워드 포함 여부 뱃지 표시
                 is_trend = any(kw in menu_text for kw in ALL_TREND_KEYWORDS)
                 is_eco = any(kw in menu_text for kw in ECO_KEYWORDS)
                 is_vegan = any(kw in menu_text for kw in VEGAN_KEYWORDS)
@@ -221,7 +225,6 @@ if period_schools:
         st.subheader("📋 학교별 중식 요약 데이터")
         st.dataframe(result_df, use_container_width=True)
 
-        # 1. 유행 메뉴 반영 비율
         st.subheader("🔥 유행 메뉴 반영 비율 비교 (중식 기준)")
         fig1 = px.bar(
             result_df, x="학교명", y="유행메뉴 비율(%)", color="학교명",
@@ -230,7 +233,6 @@ if period_schools:
         fig1.update_traces(texttemplate='%{text}%', textposition='outside')
         st.plotly_chart(fig1, use_container_width=True)
 
-        # 2. 친환경 & 채식 비교
         st.subheader("🌱 친환경 식재료 및 채식 선택권 비교 (중식 기준)")
         eco_vegan_df = result_df.melt(
             id_vars="학교명",
@@ -245,7 +247,6 @@ if period_schools:
         fig2.update_traces(texttemplate='%{text}%', textposition='outside')
         st.plotly_chart(fig2, use_container_width=True)
 
-        # 3. 종합 레이더 차트
         st.subheader("🕸️ 종합 비교 (레이더 차트)")
         categories = ["유행메뉴 비율(%)", "친환경 비율(%)", "채식메뉴 비율(%)"]
         fig3 = go.Figure()
@@ -260,7 +261,6 @@ if period_schools:
         )
         st.plotly_chart(fig3, use_container_width=True)
 
-        # 4. 학교별 상세 메뉴 확인
         st.subheader("🔍 학교별 상세 중식 메뉴 확인")
         check_school = st.selectbox("확인할 학교를 선택하세요", period_schools, key="detail_select")
         if not all_meal_data[check_school].empty:
