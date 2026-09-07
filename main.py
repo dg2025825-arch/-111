@@ -21,16 +21,12 @@ SCHOOL_LIST = {
     "성보고등학교": {"ATPT_OFCDC_SC_CODE": "B10", "SD_SCHUL_CODE": "7010194"},
 }
 
-# ------------------------------
-# 연도별 유행 메뉴 키워드
-# (학생들이 직접 조사해서 업데이트하는 부분 - SNS/뉴스 검색 기반으로 수기 입력)
-# ------------------------------
+# 연도별 유행 메뉴 키워드 (직접 조사해서 업데이트하는 부분)
 TREND_KEYWORDS_BY_YEAR = {
     2023: ["마라탕", "탕후루", "흑당", "요아정", "크로플", "마라샹궈"],
     2024: ["두바이초콜릿", "요아정", "마라탕후루", "약과", "탕후루", "말차"],
     2025: ["요아정", "두바이초콜릿", "마라탕", "흑당", "탕후루"],
 }
-# 연도 구분 없이 전체 통합 키워드도 사용 가능
 ALL_TREND_KEYWORDS = sorted(set(sum(TREND_KEYWORDS_BY_YEAR.values(), [])))
 
 ECO_KEYWORDS = ["친환경", "유기농", "무항생제", "동물복지", "저탄소"]
@@ -55,27 +51,32 @@ def get_lunch_data(office_code, school_code, start_date, end_date):
         res = requests.get(BASE_URL, params=params, timeout=10)
         data = res.json()
 
+        # 결과가 없거나 오류 응답인 경우
+        first_key = data.get("mealServiceDietInfo", [{}])[0]
+        if "RESULT" in first_key:
+            return pd.DataFrame(), first_key["RESULT"].get("MESSAGE", "데이터 없음")
+
         if "mealServiceDietInfo" not in data:
-            return pd.DataFrame()
+            return pd.DataFrame(), "예상치 못한 응답 형식"
 
         rows = data["mealServiceDietInfo"][1]["row"]
         df = pd.DataFrame(rows)
 
-        # 중식(2)만 필터링 (MMEAL_SC_CODE: 1-조식, 2-중식, 3-석식)
         if "MMEAL_SC_CODE" in df.columns:
-            df = df[df["MMEAL_SC_CODE"] == "2"]
+            df = df[df["MMEAL_SC_CODE"] == "2"]  # 중식만
+
+        if df.empty:
+            return pd.DataFrame(), "중식 데이터 없음"
 
         df = df[["MLSV_YMD", "DDISH_NM"]]
         df.columns = ["날짜", "메뉴"]
 
-        # 메뉴 텍스트 정리
         df["메뉴"] = df["메뉴"].str.replace("<br/>", " ", regex=False)
         df["메뉴"] = df["메뉴"].str.replace(r"\d+\.", "", regex=True)
         df["메뉴"] = df["메뉴"].str.replace(r"\([^)]*\)", "", regex=True)
-        return df.reset_index(drop=True)
+        return df.reset_index(drop=True), None
     except Exception as e:
-        st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), f"오류 발생: {e}"
 
 
 def count_keyword_hits(df, keywords):
@@ -91,64 +92,115 @@ def count_keyword_hits(df, keywords):
     return len(hit_dates), hit_dates
 
 
-# ------------------------------
-# 사이드바 UI
-# ------------------------------
-st.sidebar.title("📊 분석 조건 설정")
+# ==============================================================
+# 섹션 1: 오늘(당일) 중식 메뉴 비교 - 앱 접속 시 가장 먼저 표시
+# ==============================================================
+st.title("🍱 학교 중식 메뉴 분석 대시보드")
 
-selected_schools = st.sidebar.multiselect(
-    "비교할 학교를 선택하세요 (3개 이상 권장)",
+st.header("📅 오늘의 중식 메뉴 비교")
+
+today_str = datetime.today().strftime("%Y%m%d")
+today_display = datetime.today().strftime("%Y년 %m월 %d일")
+st.caption(f"기준 날짜: {today_display}")
+
+today_schools = st.multiselect(
+    "오늘 급식을 비교할 학교를 선택하세요 (3개 이상 권장)",
     options=list(SCHOOL_LIST.keys()),
-    default=["당곡고등학교", "구암고등학교", "서울공업고등학교"]
+    default=["당곡고등학교", "구암고등학교", "서울공업고등학교"],
+    key="today_select"
 )
 
-if len(selected_schools) < 3:
-    st.sidebar.warning("3개 이상의 학교를 선택해주세요.")
+if today_schools:
+    cols = st.columns(len(today_schools))
+    for idx, school in enumerate(today_schools):
+        info = SCHOOL_LIST[school]
+        df_today, msg = get_lunch_data(
+            info["ATPT_OFCDC_SC_CODE"], info["SD_SCHUL_CODE"], today_str, today_str
+        )
+        with cols[idx]:
+            st.subheader(school)
+            if df_today.empty:
+                st.info(f"오늘은 급식 정보가 없습니다.\n({msg})")
+            else:
+                menu_text = df_today.iloc[0]["메뉴"]
+                menu_items = [m.strip() for m in menu_text.split(" ") if m.strip()]
+                for item in menu_items:
+                    st.write(f"- {item}")
 
-today = datetime.today()
-default_start = today - timedelta(days=90)
+                # 오늘 메뉴에 유행/친환경/채식 키워드 포함 여부 뱃지 표시
+                is_trend = any(kw in menu_text for kw in ALL_TREND_KEYWORDS)
+                is_eco = any(kw in menu_text for kw in ECO_KEYWORDS)
+                is_vegan = any(kw in menu_text for kw in VEGAN_KEYWORDS)
 
-start_date = st.sidebar.date_input("시작 날짜", default_start)
-end_date = st.sidebar.date_input("종료 날짜", today)
+                badges = []
+                if is_trend:
+                    badges.append("🔥 유행메뉴")
+                if is_eco:
+                    badges.append("🌿 친환경")
+                if is_vegan:
+                    badges.append("🥦 채식")
+
+                if badges:
+                    st.success(" / ".join(badges))
+else:
+    st.info("비교할 학교를 선택해주세요.")
+
+st.markdown("---")
+
+
+# ==============================================================
+# 섹션 2: 기간 선택 후 종합 분석 (유행/친환경/채식 비율 비교)
+# ==============================================================
+st.header("📊 기간별 종합 분석")
+st.markdown("""
+선택한 기간 동안의 **중식 데이터**를 기준으로
+1) **유행 메뉴 반영 정도**
+2) **친환경 식재료 및 채식 선택권 보장 정도**  
+를 비교 분석합니다.
+""")
+
+with st.expander("🔧 분석 조건 설정 (펼쳐서 확인)", expanded=True):
+    period_schools = st.multiselect(
+        "비교할 학교를 선택하세요 (3개 이상 권장)",
+        options=list(SCHOOL_LIST.keys()),
+        default=["당곡고등학교", "구암고등학교", "서울공업고등학교"],
+        key="period_select"
+    )
+
+    if len(period_schools) < 3:
+        st.warning("3개 이상의 학교를 선택해주세요.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        start_date = st.date_input("시작 날짜", datetime.today() - timedelta(days=90))
+    with col_b:
+        end_date = st.date_input("종료 날짜", datetime.today())
+
+    st.subheader("🔥 유행 키워드 직접 수정하기")
+    st.caption("SNS·뉴스에서 최근 유행하는 음식을 찾아 아래에 추가해보세요!")
+    custom_keywords_input = st.text_area(
+        "쉼표(,)로 구분해서 입력",
+        value=", ".join(ALL_TREND_KEYWORDS)
+    )
+    custom_keywords = [kw.strip() for kw in custom_keywords_input.split(",") if kw.strip()]
 
 start_str = start_date.strftime("%Y%m%d")
 end_str = end_date.strftime("%Y%m%d")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🔥 유행 키워드 직접 수정하기")
-st.sidebar.caption("SNS·뉴스에서 최근 유행하는 음식을 찾아 아래에 추가해보세요!")
-custom_keywords_input = st.sidebar.text_area(
-    "쉼표(,)로 구분해서 입력",
-    value=", ".join(ALL_TREND_KEYWORDS)
-)
-custom_keywords = [kw.strip() for kw in custom_keywords_input.split(",") if kw.strip()]
-
-st.title("🍱 학교 중식 메뉴 분석 대시보드")
-st.markdown("""
-선택한 학교들의 **중식 식단**만을 비교하여 분석합니다.
-1) **유행 메뉴 반영 정도** (사용자 정의 키워드 기준)
-2) **친환경 식재료 및 채식 선택권 보장 정도**
-""")
-
-st.info("💡 유행 키워드는 실시간 SNS 크롤링이 아닌, 왼쪽 사이드바에서 **직접 입력/수정**하는 방식입니다. 최근 SNS나 뉴스에서 유행하는 메뉴를 검색해 키워드를 업데이트해보세요!")
-
-# ------------------------------
-# 데이터 수집 및 분석
-# ------------------------------
-if selected_schools:
+if period_schools:
     result_rows = []
     all_meal_data = {}
 
     with st.spinner("중식 급식 데이터를 불러오는 중입니다..."):
-        for school in selected_schools:
+        for school in period_schools:
             info = SCHOOL_LIST[school]
-            df = get_lunch_data(info["ATPT_OFCDC_SC_CODE"], info["SD_SCHUL_CODE"], start_str, end_str)
+            df, msg = get_lunch_data(info["ATPT_OFCDC_SC_CODE"], info["SD_SCHUL_CODE"], start_str, end_str)
             all_meal_data[school] = df
 
             total_days = len(df)
-            trend_count, trend_dates = count_keyword_hits(df, custom_keywords)
-            eco_count, eco_dates = count_keyword_hits(df, ECO_KEYWORDS)
-            vegan_count, vegan_dates = count_keyword_hits(df, VEGAN_KEYWORDS)
+            trend_count, _ = count_keyword_hits(df, custom_keywords)
+            eco_count, _ = count_keyword_hits(df, ECO_KEYWORDS)
+            vegan_count, _ = count_keyword_hits(df, VEGAN_KEYWORDS)
 
             result_rows.append({
                 "학교명": school,
@@ -169,80 +221,54 @@ if selected_schools:
         st.subheader("📋 학교별 중식 요약 데이터")
         st.dataframe(result_df, use_container_width=True)
 
-        # ------------------------------
-        # 1. 유행 메뉴 반영 비율 그래프
-        # ------------------------------
+        # 1. 유행 메뉴 반영 비율
         st.subheader("🔥 유행 메뉴 반영 비율 비교 (중식 기준)")
         fig1 = px.bar(
-            result_df,
-            x="학교명",
-            y="유행메뉴 비율(%)",
-            color="학교명",
-            text="유행메뉴 비율(%)",
-            title="학교별 중식 유행 메뉴 등장 비율 (%)"
+            result_df, x="학교명", y="유행메뉴 비율(%)", color="학교명",
+            text="유행메뉴 비율(%)", title="학교별 중식 유행 메뉴 등장 비율 (%)"
         )
         fig1.update_traces(texttemplate='%{text}%', textposition='outside')
         st.plotly_chart(fig1, use_container_width=True)
 
-        # ------------------------------
-        # 2. 친환경 & 채식 비교 그래프
-        # ------------------------------
+        # 2. 친환경 & 채식 비교
         st.subheader("🌱 친환경 식재료 및 채식 선택권 비교 (중식 기준)")
-
         eco_vegan_df = result_df.melt(
             id_vars="학교명",
             value_vars=["친환경 비율(%)", "채식메뉴 비율(%)"],
-            var_name="구분",
-            value_name="비율(%)"
+            var_name="구분", value_name="비율(%)"
         )
-
         fig2 = px.bar(
-            eco_vegan_df,
-            x="학교명",
-            y="비율(%)",
-            color="구분",
-            barmode="group",
-            text="비율(%)",
+            eco_vegan_df, x="학교명", y="비율(%)", color="구분",
+            barmode="group", text="비율(%)",
             title="학교별 중식 친환경 및 채식 메뉴 제공 비율"
         )
         fig2.update_traces(texttemplate='%{text}%', textposition='outside')
         st.plotly_chart(fig2, use_container_width=True)
 
-        # ------------------------------
         # 3. 종합 레이더 차트
-        # ------------------------------
         st.subheader("🕸️ 종합 비교 (레이더 차트)")
-
         categories = ["유행메뉴 비율(%)", "친환경 비율(%)", "채식메뉴 비율(%)"]
-
         fig3 = go.Figure()
         for _, row in result_df.iterrows():
             fig3.add_trace(go.Scatterpolar(
-                r=[row[c] for c in categories],
-                theta=categories,
-                fill='toself',
-                name=row["학교명"]
+                r=[row[c] for c in categories], theta=categories,
+                fill='toself', name=row["학교명"]
             ))
-
         fig3.update_layout(
             polar=dict(radialaxis=dict(visible=True, range=[0, max(result_df[categories].max()) + 5])),
-            showlegend=True,
-            title="학교별 종합 비교 레이더 차트 (중식 기준)"
+            showlegend=True, title="학교별 종합 비교 레이더 차트 (중식 기준)"
         )
         st.plotly_chart(fig3, use_container_width=True)
 
-        # ------------------------------
-        # 4. 학교별 상세 중식 메뉴 확인
-        # ------------------------------
+        # 4. 학교별 상세 메뉴 확인
         st.subheader("🔍 학교별 상세 중식 메뉴 확인")
-        check_school = st.selectbox("확인할 학교를 선택하세요", selected_schools)
+        check_school = st.selectbox("확인할 학교를 선택하세요", period_schools, key="detail_select")
         if not all_meal_data[check_school].empty:
             st.dataframe(all_meal_data[check_school], use_container_width=True, height=400)
         else:
             st.info("해당 학교의 데이터가 없습니다.")
-
 else:
-    st.info("왼쪽 사이드바에서 비교할 학교를 3개 이상 선택해주세요.")
+    st.info("비교할 학교를 3개 이상 선택해주세요.")
 
 
 # ------------------------------
@@ -252,8 +278,8 @@ st.markdown("---")
 st.caption("""
 📌 **분석 기준 안내**  
 - 분석 대상: **중식(점심)** 메뉴만 사용  
-- 유행 메뉴 키워드: 사이드바에서 직접 수정 가능 (SNS/뉴스 검색 후 업데이트 권장)  
+- 유행 메뉴 키워드: 직접 수정 가능 (SNS/뉴스 검색 후 업데이트 권장)  
 - 친환경 키워드: 친환경, 유기농, 무항생제, 동물복지 등  
 - 채식 키워드: 채식, 비건, 샐러드바, 두부스테이크 등  
-- 본 분석은 급식 식단표에 표기된 텍스트만을 기준으로 하며, 실시간 SNS 데이터는 반영되지 않습니다.
+- 본 분석은 급식 식단표에 표기된 텍스트만을 기준으로 합니다.
 """)
